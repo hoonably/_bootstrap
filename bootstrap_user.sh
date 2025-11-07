@@ -17,9 +17,12 @@ SSH_DIR="$HOME/.ssh"
 mkdir -p "$SSH_DIR"
 chmod 700 "$SSH_DIR"
 
-# known_hosts 사전 등록
-if ! ssh-keygen -F github.com >/dev/null; then
-  ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true
+# known_hosts 사전 등록(파일 보장 + ssh-keyscan 있으면만 등록)
+touch "$SSH_DIR/known_hosts"
+if command -v ssh-keyscan >/dev/null 2>&1; then
+  if ! ssh-keygen -F github.com >/dev/null; then
+    ssh-keyscan github.com >> "$SSH_DIR/known_hosts" 2>/dev/null || true
+  fi
 fi
 chmod 600 "$SSH_DIR/known_hosts" || true
 
@@ -42,28 +45,67 @@ EOF
 chmod 600 "$SSH_DIR/config"
 echo "[+] .ssh/config ready"
 
-# GitHub 공개키 자동 업로드 (GITHUB_TOKEN 있으면)
-if command -v curl >/dev/null 2>&1 && [ -n "${GITHUB_TOKEN:-}" ]; then
-  PUB_KEY="$(cat "$SSH_DIR/id_ed25519.pub")"
-  TITLE="${HOSTNAME}-$(date +%F)"
-  RESP_CODE=$(
-    curl -s -o /dev/null -w "%{http_code}" \
-      -H "Authorization: token $GITHUB_TOKEN" \
-      -H "Accept: application/vnd.github+json" \
-      -d "{\"title\":\"$TITLE\",\"key\":\"$PUB_KEY\"}" \
-      https://api.github.com/user/keys
-  )
-  if [ "$RESP_CODE" = "201" ] || [ "$RESP_CODE" = "422" ]; then
-    echo "[+] GitHub SSH key registered or already exists ($RESP_CODE)"
-  else
-    echo "[!] GitHub SSH key registration failed (HTTP $RESP_CODE)"
-  fi
-else
-  echo "[=] Skip GitHub key upload (curl or GITHUB_TOKEN missing)"
-fi
 
-# 연결 테스트는 실패해도 진행
-ssh -T git@github.com || true
+# GitHub SSH 인증
+prompt_manual_github_key() {
+  echo
+  echo "======= GitHub SSH key setup check ======="
+  echo
+
+  # --- 1회 인증 시도 ---
+  set +e
+  out="$(ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$SSH_DIR/id_ed25519" -T git@github.com 2>&1)"
+  rc=$?
+  set -e
+  if echo "$out" | grep -qi "you've successfully authenticated"; then
+    echo "[=] 이미 GitHub SSH 인증이 완료되어 있음 ✅"
+    echo "$out"
+    return 0
+  fi
+  
+  # --- 인증 안 된 경우 수동 등록 안내 ---
+  echo "[!] GitHub SSH 인증되지 않음 — 수동 등록 필요"
+  echo
+  echo "1) 아래 공개키 내용을 복사"
+  echo "   (파일: $SSH_DIR/id_ed25519.pub)"
+  echo
+  echo "----------------------------------------------------------------"
+  cat "$SSH_DIR/id_ed25519.pub"
+  echo "----------------------------------------------------------------"
+  echo
+  echo "2) 브라우저로 열기 → GitHub Settings > SSH and GPG keys > New SSH key"
+  echo "   링크: https://github.com/settings/keys"
+  echo
+  if command -v xdg-open >/dev/null 2>&1; then
+    xdg-open "https://github.com/settings/keys" >/dev/null 2>&1 || true
+  fi
+
+  while true; do
+    read -r -p "[?] 키 등록 완료면 Enter, 건너뛰려면 'skip' 입력: " ans
+    if [ "${ans:-}" = "skip" ]; then
+      echo "[=] 수동 등록 건너뜀"
+      break
+    fi
+
+    set +e
+    out="$(ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$SSH_DIR/id_ed25519" -T git@github.com 2>&1)"
+    rc=$?
+    set -e
+    echo "$out"
+
+    if echo "$out" | grep -qi "you've successfully authenticated"; then
+      echo "[+] GitHub SSH 인증 확인 완료 ✅"
+      break
+    else
+      echo "[!] 아직 인증되지 않음. GitHub 페이지에서 'Add SSH key' 저장 후 다시 Enter"
+      echo "    링크: https://github.com/settings/keys"
+      sleep 1
+    fi
+  done
+  echo
+}
+
+prompt_manual_github_key
 
 # .gitconfig 자동 생성 (기존 있으면 1회 백업)
 GITCONFIG_PATH="$HOME/.gitconfig"

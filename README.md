@@ -59,17 +59,6 @@ That’s it — your environment is ready.
 
 ---
 
-## 🔧 Example Workflow
-
-```bash
-chmod +x os_setup.sh bootstrap_user.sh
-./os_setup.sh
-./bootstrap_user.sh
-source ~/.bashrc
-```
-
----
-
 ## 🧠 Notes
 
 * The repository is fully public — only sensitive files are ignored.

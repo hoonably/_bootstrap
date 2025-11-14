@@ -21,6 +21,9 @@ A lightweight GPU activity monitor that automatically runs short dummy workloads
 # PyTorch (CUDA 12.1 example)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 
+# Numpy
+pip install numpy
+
 # Optional: setproctitle for cleaner process titles
 pip install setproctitle
 ```

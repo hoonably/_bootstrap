@@ -1,0 +1,18 @@
+#!/bin/bash
+# GPU 감지 모드 전환 스크립트
+
+CONTROL_DIR="/tmp/gpu_dummy_control"
+mkdir -p "$CONTROL_DIR"
+
+if [ -z "$1" ]; then
+    # argument 없으면 모든 GPU 감지 모드로 전환
+    GPU_COUNT=$(nvidia-smi --query-gpu=index --format=csv,noheader | wc -l)
+    for ((i=0; i<GPU_COUNT; i++)); do
+        touch "$CONTROL_DIR/watch_$i"
+    done
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 모든 GPU를 감지 모드로 전환 요청"
+else
+    GPU_ID=$1
+    touch "$CONTROL_DIR/watch_$GPU_ID"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] GPU $GPU_ID를 감지 모드로 전환 요청"
+fi

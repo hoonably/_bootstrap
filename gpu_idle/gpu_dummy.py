@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 GPU 더미 자동 실행기
-- 기본: 모든 GPU에서 100% 더미 부하 실행
-- 외부 명령으로 감지 모드 전환 (30분 연속 0%면 다시 더미 모드)
+- 기본: 모든 GPU에서 100% 더미 부하 자동 실행
+- 자동 감지: Dummy가 아닌 프로세스 감지 시 즉시 감지 모드로 전환
+- 자동 복귀: 5분 동안 프로세스 없으면 자동으로 더미 모드 복귀
+- 수동 제어: stop 명령으로 특정 GPU를 감지 모드로 전환 가능
 """
 
 import subprocess, time, os, sys, signal
@@ -10,10 +12,9 @@ from typing import Dict, List, Tuple, Optional
 import datetime as dt
 
 POLL_INTERVAL_SEC = 1
-IDLE_THRESHOLD_SEC = 30 * 60  # 30분
+IDLE_THRESHOLD_SEC = 5 * 60  # 5분
 NVIDIA_SMI = "nvidia-smi"
 DASHBOARD_INTERVAL = 2  # 대시보드 업데이트 주기
-CONTROL_DIR = "/tmp/gpu_dummy_control"  # 제어 파일 디렉토리
 
 _prev_lines = 0
 
@@ -58,6 +59,46 @@ def read_gpu_utils() -> List[Tuple[int, int]]:
             except ValueError:
                 pass
     return out
+
+def read_gpu_processes() -> Dict[int, List[str]]:
+    """각 GPU에서 실행 중인 프로세스 이름 목록 반환"""
+    cmd = [NVIDIA_SMI, "--query-compute-apps=gpu_uuid,process_name", "--format=csv,noheader"]
+    res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0:
+        return {}
+    
+    # GPU UUID to index 매핑
+    uuid_cmd = [NVIDIA_SMI, "--query-gpu=index,gpu_uuid", "--format=csv,noheader"]
+    uuid_res = subprocess.run(uuid_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    uuid_to_idx = {}
+    if uuid_res.returncode == 0:
+        for line in uuid_res.stdout.strip().split('\n'):
+            if not line.strip():
+                continue
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) == 2:
+                try:
+                    uuid_to_idx[parts[1]] = int(parts[0])
+                except ValueError:
+                    pass
+    
+    # GPU별 프로세스 이름 수집
+    gpu_procs: Dict[int, List[str]] = {}
+    for line in res.stdout.strip().split('\n'):
+        if not line.strip():
+            continue
+        parts = [p.strip() for p in line.split(",")]
+        if len(parts) == 2:
+            gpu_uuid, proc_name = parts[0], parts[1]
+            if gpu_uuid in uuid_to_idx:
+                gpu_id = uuid_to_idx[gpu_uuid]
+                if gpu_id not in gpu_procs:
+                    gpu_procs[gpu_id] = []
+                # 프로세스 이름에서 경로 제거 (basename만)
+                proc_basename = os.path.basename(proc_name)
+                gpu_procs[gpu_id].append(proc_basename)
+    
+    return gpu_procs
 
 def run_dummy_worker(gpu_id: int) -> None:
     """별도 프로세스에서 지정 GPU에 더미 부하 실행"""
@@ -123,10 +164,6 @@ class GPUManager:
         self.modes: Dict[int, str] = {}  # 'dummy' or 'watch'
         self.processes: Dict[int, Optional[subprocess.Popen]] = {}
         self.idle_start: Dict[int, float] = {}
-        self.last_util: Dict[int, int] = {}
-        
-        # 제어 디렉토리 생성
-        os.makedirs(CONTROL_DIR, exist_ok=True)
         
     def init_gpus(self):
         """GPU 초기화 및 더미 모드로 시작"""
@@ -138,13 +175,11 @@ class GPUManager:
         for gpu_id, _ in utils:
             self.gpu_count = max(self.gpu_count, gpu_id + 1)
             self.modes[gpu_id] = 'dummy'
-            self.last_util[gpu_id] = 0
             self.idle_start[gpu_id] = 0
             self.processes[gpu_id] = None
             self.start_dummy(gpu_id)
         
         print(f"[{now()}] {self.gpu_count}개 GPU 감지, 모두 더미 모드로 시작")
-        print(f"[{now()}] 외부 제어: stop <gpu_id> 스크립트 사용")
         return True
     
     def start_dummy(self, gpu_id: int):
@@ -186,76 +221,73 @@ run_dummy_worker({gpu_id})
                 pass
             self.processes[gpu_id] = None
     
-    def switch_to_watch(self, gpu_id: int):
-        """감지 모드로 전환"""
-        if gpu_id >= self.gpu_count:
-            return
-        
-        if self.modes.get(gpu_id) == 'watch':
-            return
-        
-        self.stop_dummy(gpu_id)
-        self.modes[gpu_id] = 'watch'
-        self.idle_start[gpu_id] = 0
-    
-    def check_control_files(self):
-        """제어 파일 확인 및 처리"""
-        try:
-            for filename in os.listdir(CONTROL_DIR):
-                if filename.startswith("watch_"):
-                    filepath = os.path.join(CONTROL_DIR, filename)
-                    try:
-                        gpu_id = int(filename.split("_")[1])
-                        self.switch_to_watch(gpu_id)
-                        os.remove(filepath)  # 처리 후 파일 삭제
-                    except (ValueError, IndexError):
-                        pass
-        except FileNotFoundError:
-            pass
+
     
     def update(self):
-        """상태 업데이트 (감지 모드 체크)"""
-        utils = read_gpu_utils()
-        util_map = {idx: util for idx, util in utils}
+        """상태 업데이트 (프로세스 기반 자동 감지 및 복귀)"""
+        # GPU 프로세스 체크
+        gpu_procs = read_gpu_processes()
         
         t = time.time()
         
         for gpu_id in range(self.gpu_count):
-            util = util_map.get(gpu_id, 0)
-            self.last_util[gpu_id] = util
+            procs = gpu_procs.get(gpu_id, [])
             
+            # Dummy 프로세스 제외한 실제 프로세스 확인
+            non_dummy_procs = [p for p in procs if not p.startswith('Dummy-GPU')]
+            has_process = len(non_dummy_procs) > 0
+            
+            # [자동 감지] Dummy가 아닌 프로세스 감지 시 즉시 감지 모드로 전환
+            if self.modes.get(gpu_id) == 'dummy':
+                if has_process:
+                    self.stop_dummy(gpu_id)
+                    self.modes[gpu_id] = 'watch'
+                    self.idle_start[gpu_id] = 0
+                    continue
+            
+            # [감지 모드] 프로세스 없으면 5분 대기 후 더미 복귀
             if self.modes.get(gpu_id) == 'watch':
-                if util == 0:
+                if not has_process:
+                    # 프로세스가 없으면 idle 카운트 시작
                     if self.idle_start[gpu_id] == 0:
                         self.idle_start[gpu_id] = t
                     
                     idle_duration = t - self.idle_start[gpu_id]
                     if idle_duration >= IDLE_THRESHOLD_SEC:
-                        # 30분 연속 0% -> 더미 모드로 복귀
-                        print(f"\n[{now()}] [GPU{gpu_id}] 30분 연속 0%, 더미 모드로 복귀")
+                        # [자동 복귀] 5분 동안 프로세스 없음 -> 더미 모드로 복귀
+                        print(f"\n[{now()}] [GPU{gpu_id}] 5분 동안 프로세스 없음, 더미 모드로 복귀")
                         self.start_dummy(gpu_id)
                 else:
-                    # 사용 중이면 idle 카운터 초기화
+                    # 프로세스 있으면 idle 카운터 초기화
                     self.idle_start[gpu_id] = 0
     
     def get_status_lines(self) -> List[str]:
         """대시보드 출력용 상태 라인"""
-        lines = [f"[{now()}] GPU 더미 자동 실행기"]
+        lines = [f"[{now()}] GPU 더미 자동 실행기 (프로세스 기반 감지)"]
+        
+        # 현재 프로세스 상태 조회
+        gpu_procs = read_gpu_processes()
         
         t = time.time()
         for gpu_id in range(self.gpu_count):
             mode = self.modes.get(gpu_id, 'unknown')
-            util = self.last_util.get(gpu_id, 0)
+            procs = gpu_procs.get(gpu_id, [])
+            non_dummy_procs = [p for p in procs if not p.startswith('Dummy-GPU')]
             
             if mode == 'dummy':
-                lines.append(f"  [GPU{gpu_id}] 더미 모드 실행중 (util={util}%)")
+                lines.append(f"  [GPU{gpu_id}] 더미 모드 실행중")
             elif mode == 'watch':
-                if util == 0 and self.idle_start[gpu_id] > 0:
+                if len(non_dummy_procs) > 0:
+                    proc_names = ", ".join(non_dummy_procs[:2])  # 최대 2개만 표시
+                    if len(non_dummy_procs) > 2:
+                        proc_names += f" +{len(non_dummy_procs)-2}"
+                    lines.append(f"  [GPU{gpu_id}] 감지 모드 - 사용중 ({proc_names})")
+                elif self.idle_start[gpu_id] > 0:
                     idle_dur = int(t - self.idle_start[gpu_id])
                     remain = max(0, IDLE_THRESHOLD_SEC - idle_dur)
-                    lines.append(f"  [GPU{gpu_id}] 감지 모드 - 유휴 {fmt_time(idle_dur)} / {fmt_time(IDLE_THRESHOLD_SEC)} (남은시간 {fmt_time(remain)})")
+                    lines.append(f"  [GPU{gpu_id}] 감지 모드 - 대기 {fmt_time(idle_dur)} / {fmt_time(IDLE_THRESHOLD_SEC)} (남은 {fmt_time(remain)})")
                 else:
-                    lines.append(f"  [GPU{gpu_id}] 감지 모드 - 사용중 (util={util}%)")
+                    lines.append(f"  [GPU{gpu_id}] 감지 모드 - 대기 중")
         
         return lines
 
@@ -275,7 +307,6 @@ def main():
     
     try:
         while True:
-            manager.check_control_files()  # 제어 파일 확인
             manager.update()
             
             # 대시보드 업데이트

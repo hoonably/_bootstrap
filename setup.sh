@@ -6,6 +6,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # 실패 추적 배열
 FAILURES=()
+GIT_IDENTITY_SETUP_ENABLED=true
 
 # ============================================================
 # 환경 감지 (K8s vs SSH)
@@ -138,7 +139,7 @@ if [ "$IS_K8S" = true ]; then
     fi
   else
     echo "[-] GitHub 토큰이 없어 HTTPS 인증 설정을 건너뜀"
-    FAILURES+=("GitHub 토큰 입력 없음")
+    GIT_IDENTITY_SETUP_ENABLED=false
   fi
 
 else
@@ -274,37 +275,41 @@ echo "======= Git 기본 설정 ======="
 echo ""
 
 if command -v git >/dev/null 2>&1; then
-  current_name="$(git config --global user.name || true)"
-  current_email="$(git config --global user.email || true)"
+  if [ "$GIT_IDENTITY_SETUP_ENABLED" = true ]; then
+    current_name="$(git config --global user.name || true)"
+    current_email="$(git config --global user.email || true)"
 
-  if [ -n "$current_name" ]; then
-    echo "[=] 기존 Git user.name 재사용: $current_name"
-  else
-    read -r -p "Git user.name 입력 (예: Your Name): " git_name
-    if [ -n "${git_name:-}" ]; then
-      git config --global user.name "$git_name"
-      echo "[+] Git user.name 설정 완료"
+    if [ -n "$current_name" ]; then
+      echo "[=] 기존 Git user.name 재사용: $current_name"
     else
-      echo "[!] Git user.name 입력을 건너뜀"
-      FAILURES+=("Git user.name 미설정")
+      read -r -p "Git user.name 입력 (예: Your Name): " git_name
+      if [ -n "${git_name:-}" ]; then
+        git config --global user.name "$git_name"
+        echo "[+] Git user.name 설정 완료"
+      else
+        echo "[!] Git user.name 입력을 건너뜀"
+        FAILURES+=("Git user.name 미설정")
+      fi
     fi
-  fi
 
-  if [ -n "$current_email" ]; then
-    echo "[=] 기존 Git user.email 재사용: $current_email"
-  else
-    read -r -p "Git user.email 입력 (GitHub 연동 원하면 GitHub 계정 이메일): " git_email
-    if [ -n "${git_email:-}" ]; then
-      git config --global user.email "$git_email"
-      echo "[+] Git user.email 설정 완료"
+    if [ -n "$current_email" ]; then
+      echo "[=] 기존 Git user.email 재사용: $current_email"
     else
-      echo "[!] Git user.email 입력을 건너뜀"
-      FAILURES+=("Git user.email 미설정")
+      read -r -p "Git user.email 입력 (GitHub 연동 원하면 GitHub 계정 이메일): " git_email
+      if [ -n "${git_email:-}" ]; then
+        git config --global user.email "$git_email"
+        echo "[+] Git user.email 설정 완료"
+      else
+        echo "[!] Git user.email 입력을 건너뜀"
+        FAILURES+=("Git user.email 미설정")
+      fi
     fi
-  fi
 
-  git config --global init.defaultBranch main
-  git config --global pull.ff only
+    git config --global init.defaultBranch main
+    git config --global pull.ff only
+  else
+    echo "[=] GitHub 토큰이 없어 Git 기본 설정을 건너뜀"
+  fi
 else
   echo "[-] git 명령을 찾을 수 없어 Git 기본 설정을 건너뜀"
   FAILURES+=("Git 기본 설정")

@@ -28,25 +28,40 @@ echo ""
 
 CONDA_INSTALLED=false
 
-if [ -d "$HOME/miniconda3" ]; then
+if command -v conda >/dev/null 2>&1; then
+  echo "[=] Conda 이미 설치됨: $(command -v conda)"
+
+  # ~/.bashrc에 conda initialize가 없고, 설치 위치를 찾을 수 있으면 init
+  if ! grep -q 'conda initialize' ~/.bashrc 2>/dev/null; then
+    CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+    if [ -n "${CONDA_BASE:-}" ] && [ -f "$CONDA_BASE/bin/conda" ]; then
+      "$CONDA_BASE/bin/conda" init bash 2>/dev/null || true
+      echo "[+] conda init 완료"
+    fi
+  fi
+
+  CONDA_INSTALLED=true
+
+elif [ -d "$HOME/miniconda3" ]; then
   echo "[=] Miniconda 디렉토리 존재: $HOME/miniconda3"
-  # conda init 확인
+
   if ! grep -q 'conda initialize' ~/.bashrc 2>/dev/null; then
     if [ -f "$HOME/miniconda3/bin/conda" ]; then
       "$HOME/miniconda3/bin/conda" init bash 2>/dev/null || true
       echo "[+] conda init 완료"
     fi
   fi
+
   CONDA_INSTALLED=true
-elif ! command -v conda >/dev/null 2>&1; then
+
+else
   echo "[*] Miniconda 설치 중..."
   if wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O "$HOME/miniconda.sh" 2>/dev/null; then
     if ! bash "$HOME/miniconda.sh" -b -p "$HOME/miniconda3" 2>/dev/null; then
       FAILURES+=("Miniconda 설치")
     fi
     rm -f "$HOME/miniconda.sh"
-    
-    # conda init
+
     if [ -f "$HOME/miniconda3/bin/conda" ]; then
       if ! grep -q 'conda initialize' ~/.bashrc 2>/dev/null; then
         "$HOME/miniconda3/bin/conda" init bash 2>/dev/null || true
@@ -57,16 +72,16 @@ elif ! command -v conda >/dev/null 2>&1; then
   else
     FAILURES+=("Miniconda 다운로드")
   fi
-else
-  echo "[=] Conda 이미 설치됨: $(command -v conda)"
-  CONDA_INSTALLED=true
 fi
 
 # 현재 shell에서 conda 사용 가능하도록 초기화
-if [ "$CONDA_INSTALLED" = true ] && [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-  source "$HOME/miniconda3/etc/profile.d/conda.sh"
-  conda activate base 2>/dev/null || true
-  echo "[+] 현재 shell에서 conda 활성화 완료"
+if [ "$CONDA_INSTALLED" = true ]; then
+  CONDA_BASE="$(conda info --base 2>/dev/null || true)"
+  if [ -n "${CONDA_BASE:-}" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+    conda activate base 2>/dev/null || true
+    echo "[+] 현재 shell에서 conda 활성화 완료"
+  fi
 fi
 
 # ============================================================

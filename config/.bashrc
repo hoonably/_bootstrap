@@ -3,8 +3,9 @@ source /opt/conda/etc/profile.d/conda.sh
 conda activate base
 
 # prompt
-export PS1="\[\e[1;33m\](\$(basename \$CONDA_DEFAULT_ENV))\[\e[0m\] \[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ "
+export PS1="\[\e[0;35m\](\$(basename \$CONDA_DEFAULT_ENV))\[\e[0m\] \[\e[0;32m\]\u@\h\[\e[0m\]:\[\e[0;36m\]\w\[\e[0m\]\$ "
 
+alias ls='ls --color=auto'
 alias ll='ls -lh'
 alias la='ls -A'
 

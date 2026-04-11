@@ -48,5 +48,5 @@ alias ca='conda activate'
 alias cl='conda env list'
 alias cr='conda env remove -n'
 
-alias tree2='tree -L 2'
-alias tree3='tree -L 3'
+alias tree2='tree -a -L 2'
+alias tree3='tree -a -L 3'

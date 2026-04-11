@@ -80,6 +80,7 @@ if [ "$CONDA_INSTALLED" = true ]; then
   if [ -n "${CONDA_BASE:-}" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
     source "$CONDA_BASE/etc/profile.d/conda.sh"
     conda activate base 2>/dev/null || true
+    conda config --set changeps1 false 2>/dev/null || true
     echo "[+] 현재 shell에서 conda 활성화 완료"
   fi
 fi

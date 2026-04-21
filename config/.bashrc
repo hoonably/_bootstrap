@@ -1,3 +1,8 @@
+# conda
+if command -v conda >/dev/null 2>&1 && [ -z "$CONDA_DEFAULT_ENV" ]; then
+    conda activate base
+fi
+
 # prompt
 export PS1="\[\e[0;35m\](\$(basename \$CONDA_DEFAULT_ENV))\[\e[0m\] \[\e[0;32m\]\u@\h\[\e[0m\]:\[\e[0;36m\]\w\[\e[0m\]\$ "
 

@@ -1,7 +1,3 @@
-# conda
-source /opt/conda/etc/profile.d/conda.sh
-conda activate base
-
 # prompt
 export PS1="\[\e[0;35m\](\$(basename \$CONDA_DEFAULT_ENV))\[\e[0m\] \[\e[0;32m\]\u@\h\[\e[0m\]:\[\e[0;36m\]\w\[\e[0m\]\$ "
 

@@ -1,4 +1,8 @@
 # conda
+if command -v conda >/dev/null 2>&1 && [ -z "$CONDA_DEFAULT_ENV" ]; then
+    conda activate base
+fi
+
 parse_conda_env() {
     if [ -n "$CONDA_DEFAULT_ENV" ]; then
         printf "(%s) " "$(basename "$CONDA_DEFAULT_ENV")"

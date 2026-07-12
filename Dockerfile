@@ -12,7 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     SHELL=/bin/bash \
     NB_PREFIX=/ \
     CONDA_DIR=/opt/conda \
-    PATH=/opt/conda/bin:$PATH
+    PATH=$PATH:/opt/conda/bin
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     sudo git git-lfs curl wget vim tree tmux htop \
@@ -28,8 +28,11 @@ RUN wget -qO /tmp/miniforge.sh \
     conda config --system --set auto_activate_base false && \
     conda clean -afy
 
-RUN python -m pip install --upgrade pip && \
-    pip install --no-cache-dir jupyterlab notebook ipykernel
+# NVIDIA 이미지의 기본 Python/PyTorch CUDA 스택을 유지한다.
+# Miniforge는 사용자 conda 환경 생성용으로만 PATH 뒤에 둔다.
+RUN /usr/local/bin/python -m pip install --upgrade pip && \
+    /usr/local/bin/python -m pip install --no-cache-dir jupyterlab notebook ipykernel && \
+    /usr/local/bin/python -c "import torch; print('torch', torch.__version__)"
 
 RUN groupadd -g ${NB_GID} ${NB_USER} && \
     useradd -m -s /bin/bash -u ${NB_UID} -g ${NB_GID} ${NB_USER} && \
@@ -48,4 +51,6 @@ WORKDIR /home/${NB_USER}
 
 EXPOSE 8888
 
-CMD ["sh", "-c", "jupyter lab --notebook-dir=${HOME} --ip=0.0.0.0 --no-browser --allow-root --port=8888 --ServerApp.token='' --ServerApp.password='' --ServerApp.allow_origin='*' --ServerApp.allow_remote_access=True --ServerApp.base_url=${NB_PREFIX}"]
+# 이 이미지는 인증된 Kubernetes ingress/proxy 뒤에서만 사용한다.
+# Jupyter 자체 인증을 끄므로 8888 포트를 외부에 직접 publish하지 않는다.
+CMD ["sh", "-c", "exec /usr/local/bin/python -m jupyter lab --notebook-dir=${HOME} --ip=0.0.0.0 --no-browser --allow-root --port=8888 --ServerApp.token='' --ServerApp.password='' --ServerApp.allow_origin='*' --ServerApp.allow_remote_access=True --ServerApp.base_url=${NB_PREFIX}"]

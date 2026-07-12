@@ -7,6 +7,75 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 실패 추적 배열
 FAILURES=()
 GIT_IDENTITY_SETUP_ENABLED=true
+BACKUP_DIR=""
+BASHRC_BACKED_UP=false
+
+record_failure() {
+  echo "[-] $1"
+  FAILURES+=("$1")
+}
+
+download_file() {
+  local url="$1"
+  local destination="$2"
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$destination"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q "$url" -O "$destination"
+  else
+    echo "[-] curl 또는 wget이 필요합니다."
+    return 1
+  fi
+}
+
+backup_file() {
+  local path="$1"
+
+  if [ ! -e "$path" ] && [ ! -L "$path" ]; then
+    return 0
+  fi
+
+  if [ -z "$BACKUP_DIR" ]; then
+    BACKUP_DIR="$HOME/.bootstrap-backups/$(date +%Y%m%d-%H%M%S)-$$"
+    mkdir -p "$BACKUP_DIR"
+    chmod 700 "$BACKUP_DIR"
+  fi
+
+  if [ -L "$path" ]; then
+    cp -L -p "$path" "$BACKUP_DIR/$(basename "$path").contents"
+    readlink "$path" > "$BACKUP_DIR/$(basename "$path").symlink-target"
+    echo "[+] 기존 symlink 파일 백업: $BACKUP_DIR/$(basename "$path").contents"
+  else
+    cp -a "$path" "$BACKUP_DIR/$(basename "$path")"
+    echo "[+] 기존 파일 백업: $BACKUP_DIR/$(basename "$path")"
+  fi
+}
+
+deploy_config_file() {
+  local source="$1"
+  local destination="$2"
+  local mode="$3"
+
+  if [ -e "$destination" ] || [ -L "$destination" ]; then
+    if cmp -s "$source" "$destination"; then
+      chmod "$mode" "$destination"
+      echo "[=] 기존 설정 유지: $destination"
+      return 0
+    fi
+    backup_file "$destination"
+  fi
+
+  cp -f "$source" "$destination"
+  chmod "$mode" "$destination"
+  echo "[+] 설정 적용: $destination"
+}
+
+configure_github_credential_store() {
+  # 다른 host의 credential helper는 유지하고 GitHub에만 store를 사용한다.
+  git config --global --replace-all credential.https://github.com.helper ""
+  git config --global --add credential.https://github.com.helper store
+}
 
 # ============================================================
 # 환경 감지 (K8s vs SSH)
@@ -27,62 +96,83 @@ echo "======= Miniconda 설치 ======="
 echo ""
 
 CONDA_INSTALLED=false
+CONDA_EXE=""
+CONDA_BASE=""
 
 if command -v conda >/dev/null 2>&1; then
-  echo "[=] Conda 이미 설치됨: $(command -v conda)"
+  CONDA_EXE="$(command -v conda)"
+  echo "[=] Conda 이미 설치됨: $CONDA_EXE"
 
-  # ~/.bashrc에 conda initialize가 없고, 설치 위치를 찾을 수 있으면 init
-  if ! grep -q 'conda initialize' ~/.bashrc 2>/dev/null; then
-    CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-    if [ -n "${CONDA_BASE:-}" ] && [ -f "$CONDA_BASE/bin/conda" ]; then
-      "$CONDA_BASE/bin/conda" init bash 2>/dev/null || true
-      echo "[+] conda init 완료"
-    fi
-  fi
-
-  CONDA_INSTALLED=true
-
-elif [ -d "$HOME/miniconda3" ]; then
-  echo "[=] Miniconda 디렉토리 존재: $HOME/miniconda3"
-
-  if ! grep -q 'conda initialize' ~/.bashrc 2>/dev/null; then
-    if [ -f "$HOME/miniconda3/bin/conda" ]; then
-      "$HOME/miniconda3/bin/conda" init bash 2>/dev/null || true
-      echo "[+] conda init 완료"
-    fi
-  fi
-
-  CONDA_INSTALLED=true
+elif [ -x "$HOME/miniconda3/bin/conda" ]; then
+  CONDA_EXE="$HOME/miniconda3/bin/conda"
+  echo "[=] Miniconda 설치 재사용: $HOME/miniconda3"
 
 else
-  echo "[*] Miniconda 설치 중..."
-  if wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O "$HOME/miniconda.sh" 2>/dev/null; then
-    if ! bash "$HOME/miniconda.sh" -b -p "$HOME/miniconda3" 2>/dev/null; then
-      FAILURES+=("Miniconda 설치")
-    fi
-    rm -f "$HOME/miniconda.sh"
+  case "$(uname -m)" in
+    x86_64|amd64) MINICONDA_ARCH="x86_64" ;;
+    aarch64|arm64) MINICONDA_ARCH="aarch64" ;;
+    *) MINICONDA_ARCH="" ;;
+  esac
 
-    if [ -f "$HOME/miniconda3/bin/conda" ]; then
-      if ! grep -q 'conda initialize' ~/.bashrc 2>/dev/null; then
-        "$HOME/miniconda3/bin/conda" init bash 2>/dev/null || true
-      fi
-      echo "[+] Miniconda 설치 완료"
-      CONDA_INSTALLED=true
-    fi
+  if [ -z "$MINICONDA_ARCH" ]; then
+    record_failure "지원하지 않는 CPU 아키텍처: $(uname -m)"
   else
-    FAILURES+=("Miniconda 다운로드")
+    MINICONDA_URL="https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-${MINICONDA_ARCH}.sh"
+    MINICONDA_INSTALLER="$(mktemp "${TMPDIR:-/tmp}/miniconda.XXXXXX.sh")"
+
+    if [ -d "$HOME/miniconda3" ]; then
+      echo "[*] 기존 Miniconda 설치 복구/업데이트 중..."
+      MINICONDA_ARGS=(-b -u -p "$HOME/miniconda3")
+    else
+      echo "[*] Miniconda 설치 중..."
+      MINICONDA_ARGS=(-b -p "$HOME/miniconda3")
+    fi
+
+    if download_file "$MINICONDA_URL" "$MINICONDA_INSTALLER"; then
+      if ! bash "$MINICONDA_INSTALLER" "${MINICONDA_ARGS[@]}"; then
+        record_failure "Miniconda 설치"
+      fi
+    else
+      record_failure "Miniconda 다운로드"
+    fi
+    rm -f "$MINICONDA_INSTALLER"
+
+    if [ -x "$HOME/miniconda3/bin/conda" ]; then
+      CONDA_EXE="$HOME/miniconda3/bin/conda"
+      echo "[+] Miniconda 설치 확인 완료"
+    fi
   fi
 fi
 
 # 현재 shell에서 conda 사용 가능하도록 초기화
-if [ "$CONDA_INSTALLED" = true ]; then
-  CONDA_BASE="$(conda info --base 2>/dev/null || true)"
-  if [ -n "${CONDA_BASE:-}" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+if [ -n "$CONDA_EXE" ]; then
+  CONDA_BASE="$("$CONDA_EXE" info --base 2>/dev/null || true)"
+
+  if [ -n "$CONDA_BASE" ] && [ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]; then
+    CONDA_EXE="$CONDA_BASE/bin/conda"
+    export PATH="$CONDA_BASE/bin:$PATH"
     source "$CONDA_BASE/etc/profile.d/conda.sh"
-    conda activate base 2>/dev/null || true
-    conda config --set changeps1 false 2>/dev/null || true
+    conda activate base || record_failure "Conda base 환경 활성화"
+    "$CONDA_EXE" config --set changeps1 false || true
+    CONDA_INSTALLED=true
     echo "[+] 현재 shell에서 conda 활성화 완료"
+  else
+    record_failure "Conda 설치 경로 확인"
   fi
+
+  if [ "$CONDA_INSTALLED" = true ] && ! grep -q 'conda initialize' "$HOME/.bashrc" 2>/dev/null; then
+    if [ -s "$HOME/.bashrc" ] || [ -L "$HOME/.bashrc" ]; then
+      backup_file "$HOME/.bashrc"
+      BASHRC_BACKED_UP=true
+    fi
+    if "$CONDA_EXE" init bash >/dev/null; then
+      echo "[+] conda init 완료"
+    else
+      echo "[!] conda init 실패 - 현재 setup은 계속 진행합니다."
+    fi
+  fi
+elif [ "$CONDA_INSTALLED" = false ]; then
+  record_failure "Miniconda 설치 확인"
 fi
 
 # ============================================================
@@ -96,10 +186,10 @@ if [ "$IS_K8S" = true ]; then
   CRED_FILE="$HOME/.git-credentials"
   GITHUB_AUTH_OK=false
 
-  # 1. 이미 저장된 credential이 있으면 우선 재사용
-  if [ -f "$CRED_FILE" ] && grep -q "github.com" "$CRED_FILE" 2>/dev/null; then
+  # 1. 명시적으로 전달된 토큰이 없을 때만 기존 credential 재사용
+  if [ -z "${GITHUB_TOKEN:-}" ] && [ -f "$CRED_FILE" ] && grep -q "github.com" "$CRED_FILE" 2>/dev/null; then
     echo "[=] 기존 ~/.git-credentials에서 GitHub 인증 정보 발견"
-    git config --global credential.helper store
+    configure_github_credential_store
     GITHUB_AUTH_OK=true
   fi
 
@@ -114,8 +204,12 @@ if [ "$IS_K8S" = true ]; then
     echo "  - Contents: Read and write"
     echo "  - Metadata: Read"
     echo ""
-    read -r -s -p "GITHUB_TOKEN을 붙여넣고 Enter (건너뛰려면 그냥 Enter): " GITHUB_TOKEN
-    echo ""
+    if [ -t 0 ]; then
+      read -r -s -p "GITHUB_TOKEN을 붙여넣고 Enter (건너뛰려면 그냥 Enter): " GITHUB_TOKEN || true
+      echo ""
+    else
+      echo "[!] 비대화형 실행이라 토큰 입력을 건너뜁니다. GITHUB_TOKEN 환경변수를 사용하세요."
+    fi
 
     if [ -n "${GITHUB_TOKEN:-}" ]; then
       export GITHUB_TOKEN
@@ -125,11 +219,17 @@ if [ "$IS_K8S" = true ]; then
 
   # 3. 환경변수로 토큰이 있으면 저장
   if [ "$GITHUB_AUTH_OK" = false ] && [ -n "${GITHUB_TOKEN:-}" ]; then
-    git config --global credential.helper store
-    printf 'https://oauth2:%s@github.com\n' "$GITHUB_TOKEN" > "$CRED_FILE"
-    chmod 600 "$CRED_FILE"
-    echo "[+] GITHUB_TOKEN으로 HTTPS 인증 정보 저장 완료"
-    GITHUB_AUTH_OK=true
+    configure_github_credential_store
+    if (
+      umask 077
+      printf 'protocol=https\nhost=github.com\nusername=x-access-token\npassword=%s\n\n' "$GITHUB_TOKEN" | git credential approve
+    ); then
+      [ ! -f "$CRED_FILE" ] || chmod 600 "$CRED_FILE"
+      echo "[+] GITHUB_TOKEN 저장 완료 (기존 다른 credential은 유지)"
+      GITHUB_AUTH_OK=true
+    else
+      record_failure "GitHub HTTPS credential 저장"
+    fi
   fi
 
   # 4. git remote가 git@github.com:... 여도 HTTPS로 자동 변환되게 설정
@@ -138,21 +238,12 @@ if [ "$IS_K8S" = true ]; then
   git config --global --add url."https://github.com/".insteadOf "ssh://git@github.com/"
 
   echo ""
-  echo "======= GitHub 인증 확인 (K8s) ======="
+  echo "======= GitHub HTTPS credential 확인 (K8s) ======="
   echo ""
 
   if [ "$GITHUB_AUTH_OK" = true ]; then
-    set +e
-    git ls-remote https://github.com/github/gitignore.git HEAD >/dev/null 2>&1
-    verify_result=$?
-    set -e
-
-    if [ $verify_result -eq 0 ]; then
-      echo "[+] GitHub HTTPS 인증 확인 완료"
-    else
-      echo "[-] GitHub HTTPS 인증 실패 (토큰 권한/유효기간 또는 credential 확인 필요)"
-      FAILURES+=("GitHub HTTPS 인증")
-    fi
+    echo "[+] GitHub HTTPS credential 설정 완료"
+    echo "[=] 실제 저장소 권한은 첫 fetch/push 때 확인됩니다."
   else
     echo "[-] GitHub 토큰이 없어 HTTPS 인증 설정을 건너뜀"
     GIT_IDENTITY_SETUP_ENABLED=false
@@ -168,7 +259,8 @@ else
 
   # SSH 키 생성 (없을 때만)
   if [ ! -f "$SSH_DIR/id_ed25519" ]; then
-    ssh-keygen -t ed25519 -N "" -f "$SSH_DIR/id_ed25519" -C "$HOSTNAME-$(date +%F)"
+    SSH_KEY_COMMENT="${HOSTNAME:-$(hostname)}-$(date +%F)"
+    ssh-keygen -t ed25519 -N "" -f "$SSH_DIR/id_ed25519" -C "$SSH_KEY_COMMENT"
     echo "[+] SSH 키 생성: $SSH_DIR/id_ed25519"
   else
     echo "[=] SSH 키 재사용: $SSH_DIR/id_ed25519"
@@ -222,7 +314,12 @@ EOF
     echo ""
     echo "등록 페이지: https://github.com/settings/keys"
     echo ""
-    read -r -p "[?] 등록 완료 후 Enter를 누르세요 (건너뛰려면 skip): " ans
+    ans="skip"
+    if [ -t 0 ]; then
+      read -r -p "[?] 등록 완료 후 Enter를 누르세요 (건너뛰려면 skip): " ans || true
+    else
+      echo "[!] 비대화형 실행이라 SSH 인증 재확인을 건너뜁니다."
+    fi
     if [ "${ans:-}" != "skip" ]; then
       set +e
       out="$(ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$SSH_DIR/id_ed25519" -T git@github.com 2>&1)"
@@ -244,14 +341,14 @@ echo ""
 echo "======= 개발 도구 설치 ======="
 echo ""
 
-# conda 사용 가능한지 확인 (이미 위에서 활성화했으므로)
-if ! command -v conda >/dev/null 2>&1; then
-  FAILURES+=("Conda 미설치로 개발 도구 설치 건너뜀")
+# conda 사용 가능한지 확인 (절대 경로를 사용해 첫 설치에서도 동작)
+if [ "$CONDA_INSTALLED" != true ]; then
+  record_failure "Conda 미설치로 개발 도구 설치 건너뜀"
 else
   # conda Terms of Service 자동 수락 (기본 채널 사용 시 필요)
-  if ! conda tos status 2>/dev/null | grep -q "accepted"; then
-    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
-    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
+  if ! "$CONDA_EXE" tos status 2>/dev/null | grep -q "accepted"; then
+    "$CONDA_EXE" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main 2>/dev/null || true
+    "$CONDA_EXE" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r 2>/dev/null || true
   fi
 
 # 필요한 패키지 설치 (conda-forge 채널 사용)
@@ -261,8 +358,8 @@ install_tool() {
 
   if ! command -v "$cmd" >/dev/null 2>&1; then
     echo "  - $pkg 설치 중..."
-    if ! conda install -y -c conda-forge "$pkg" 2>/dev/null; then
-      FAILURES+=("$pkg 설치")
+    if ! "$CONDA_EXE" install -y -c conda-forge "$pkg"; then
+      record_failure "$pkg 설치"
     fi
   fi
 }
@@ -298,7 +395,10 @@ if command -v git >/dev/null 2>&1; then
     if [ -n "$current_name" ]; then
       echo "[=] 기존 Git user.name 재사용: $current_name"
     else
-      read -r -p "Git user.name 입력 (예: Your Name): " git_name
+      git_name=""
+      if [ -t 0 ]; then
+        read -r -p "Git user.name 입력 (예: Your Name): " git_name || true
+      fi
       if [ -n "${git_name:-}" ]; then
         git config --global user.name "$git_name"
         echo "[+] Git user.name 설정 완료"
@@ -311,7 +411,10 @@ if command -v git >/dev/null 2>&1; then
     if [ -n "$current_email" ]; then
       echo "[=] 기존 Git user.email 재사용: $current_email"
     else
-      read -r -p "Git user.email 입력 (GitHub 연동 원하면 GitHub 계정 이메일): " git_email
+      git_email=""
+      if [ -t 0 ]; then
+        read -r -p "Git user.email 입력 (GitHub 연동 원하면 GitHub 계정 이메일): " git_email || true
+      fi
       if [ -n "${git_email:-}" ]; then
         git config --global user.email "$git_email"
         echo "[+] Git user.email 설정 완료"
@@ -339,37 +442,71 @@ echo "======= 설정 파일 복사 ======="
 echo ""
 
 # .gitignore_global 복사 및 Git에 global gitignore 설정
-cp -f "$SCRIPT_DIR/config/.gitignore_global" "$HOME/.gitignore_global"
-chmod 600 "$HOME/.gitignore_global"
+deploy_config_file "$SCRIPT_DIR/config/.gitignore_global" "$HOME/.gitignore_global" 600
 
-git config --global core.excludesfile "$HOME/.gitignore_global"
-echo "[+] .gitignore_global 복사 및 설정 완료"
+if command -v git >/dev/null 2>&1; then
+  git config --global core.excludesfile "$HOME/.gitignore_global"
+  echo "[+] Git global excludesfile 설정 완료"
+else
+  record_failure "Git global excludesfile 설정"
+fi
 
 # .tmux.conf 복사
-cp -f "$SCRIPT_DIR/config/.tmux.conf" "$HOME/.tmux.conf"
-chmod 600 "$HOME/.tmux.conf"
-echo "[+] .tmux.conf 복사 완료"
+deploy_config_file "$SCRIPT_DIR/config/.tmux.conf" "$HOME/.tmux.conf" 600
 
 # .bashrc 설정을 ~/.bashrc에 추가 (idempotent)
 BASHRC="$HOME/.bashrc"
 touch "$BASHRC"
+BASHRC_TMP="$(mktemp "${BASHRC}.bootstrap.XXXXXX")"
+START_COUNT="$(grep -Fxc "# >>> bootstrap settings >>>" "$BASHRC" 2>/dev/null || true)"
+END_COUNT="$(grep -Fxc "# <<< bootstrap settings <<<" "$BASHRC" 2>/dev/null || true)"
+MARKERS_VALID=true
 
-# 마커 확인
-if grep -q "# >>> bootstrap settings >>>" "$BASHRC" 2>/dev/null; then
-  # 기존 설정 제거 (마커 사이의 내용)
-  sed '/# >>> bootstrap settings >>>/,/# <<< bootstrap settings <<</d' "$BASHRC" > "$BASHRC.tmp"
-  mv "$BASHRC.tmp" "$BASHRC"
+if [ "$START_COUNT" -eq 1 ] && [ "$END_COUNT" -eq 1 ]; then
+  START_LINE="$(grep -Fnx "# >>> bootstrap settings >>>" "$BASHRC" | cut -d: -f1)"
+  END_LINE="$(grep -Fnx "# <<< bootstrap settings <<<" "$BASHRC" | cut -d: -f1)"
+  if [ "$START_LINE" -ge "$END_LINE" ]; then
+    MARKERS_VALID=false
+  fi
+elif [ "$START_COUNT" -ne 0 ] || [ "$END_COUNT" -ne 0 ]; then
+  MARKERS_VALID=false
 fi
 
-# 새로운 설정 추가
-{
-  echo "# >>> bootstrap settings >>>"
-  cat "$SCRIPT_DIR/config/.bashrc"
-  echo "# <<< bootstrap settings <<<"
-} >> "$BASHRC"
-source "$HOME/.bashrc"
+if [ "$MARKERS_VALID" = false ]; then
+  rm -f "$BASHRC_TMP"
+  record_failure ".bashrc bootstrap marker가 불완전하여 수정하지 않음"
+else
+  if [ "$START_COUNT" -eq 1 ]; then
+    sed '/^# >>> bootstrap settings >>>$/,/^# <<< bootstrap settings <<<$/{d;}' "$BASHRC" > "$BASHRC_TMP"
+  else
+    cp "$BASHRC" "$BASHRC_TMP"
+  fi
 
-echo "[+] .bashrc 설정 추가 완료"
+  # 기존 마지막 줄에 개행이 없어도 bootstrap marker와 합쳐지지 않게 한다.
+  if [ -s "$BASHRC_TMP" ] && [ "$(tail -c 1 "$BASHRC_TMP" | wc -l | tr -d ' ')" -eq 0 ]; then
+    echo "" >> "$BASHRC_TMP"
+  fi
+
+  {
+    echo "# >>> bootstrap settings >>>"
+    cat "$SCRIPT_DIR/config/.bashrc"
+    echo "# <<< bootstrap settings <<<"
+  } >> "$BASHRC_TMP"
+
+  if cmp -s "$BASHRC_TMP" "$BASHRC"; then
+    echo "[=] 기존 .bashrc bootstrap 설정 유지"
+  else
+    if [ "$BASHRC_BACKED_UP" = false ] && { [ -s "$BASHRC" ] || [ -L "$BASHRC" ]; }; then
+      backup_file "$BASHRC"
+      BASHRC_BACKED_UP=true
+    fi
+    cp "$BASHRC_TMP" "$BASHRC"
+    echo "[+] .bashrc bootstrap 설정 적용 완료"
+  fi
+  rm -f "$BASHRC_TMP"
+fi
+
+echo "[=] 새 설정은 'exec bash' 후 적용됩니다."
 
 # ============================================================
 # 6. 완료
@@ -384,6 +521,8 @@ else
   for failure in "${FAILURES[@]}"; do
     echo "  ❌ $failure"
   done
+  echo ""
+  exit 1
 fi
 echo ""
 

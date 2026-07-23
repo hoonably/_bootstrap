@@ -1,11 +1,11 @@
-# _bootstrap
+# devbox-bootstrap
 
 Lightweight development environment setup script for linux server.
 
 ## Quick Start
 
 ```bash
-cd _bootstrap
+cd devbox-bootstrap
 ./setup.sh
 exec bash
 ```

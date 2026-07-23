@@ -5,7 +5,7 @@ Automatically keeps GPUs running dummy workload when idle, stops when you need t
 ## ⚠️ Before You Run
 
 Install `setproctitle` in the same Python/conda environment that will run `gpu_dummy.py`.
-This is not part of the top-level `_bootstrap/setup.sh`.
+This is not part of the top-level `devbox-bootstrap/setup.sh`.
 
 ## 🚀 Quick Start
 
